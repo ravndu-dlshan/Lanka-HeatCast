@@ -11,6 +11,7 @@ Forecasting **tomorrow's maximum temperature** for **Colombo, Kandy and Nuwara E
 |---|---|
 | **Data** | Open-Meteo Historical Weather API (ERA5 reanalysis), daily, 2016-01-01 → 2026-11-15, 3 cities × 3,972 days, 9 variables (`data/`) |
 | **Target** | Next-day maximum 2 m temperature (°C) |
+| **Live mode** | The dashboard can fetch today's weather from the Open-Meteo forecast API and predict a real tomorrow, benchmarked against Open-Meteo's own physics forecast (cached 30 min; falls back to historical replay if the API is unreachable) |
 | **Split** | Train 2016–2023 · Test 2024-01-01 → 2026-11-14 (chronological, 3,147 forecasts) |
 | **Bagging** | Bagged Trees, Random Forest, Extra Trees |
 | **Boosting** | AdaBoost, Gradient Boosting, LightGBM, CatBoost |
@@ -42,13 +43,17 @@ How bagging drives variance down as estimators are added, plus feature importanc
 ![Ensemble lab](docs/screenshots/ensemble-lab.png)
 
 ### 🔮 Tomorrow predictor
-What-if sliders: change today's observations and watch every ensemble re-forecast tomorrow's maximum.
+Two modes. **🔴 Live** pulls today's actual weather for the selected city straight from the Open-Meteo
+forecast API, rebuilds all 57 features on the fly and predicts a genuine tomorrow — with Open-Meteo's own
+numerical-weather forecast drawn in as a dashed benchmark. **🗓️ Historical replay** reruns any day in the
+2024–2026 test period. In either mode the what-if sliders let you change today's observations and watch
+every ensemble re-forecast.
 
 ![Tomorrow predictor](docs/screenshots/tomorrow-predictor.png)
 
 ## Files
 * `Ensemble_Weather_SriLanka.ipynb`: the full, executed pipeline (EDA → features → models → evaluation → interpretation). Running it re-creates `artifacts/`.
-* `app.py`: Streamlit dashboard with 5 tabs: Climate story · Model arena · Forecast explorer · Ensemble lab · Tomorrow predictor (what-if).
+* `app.py`: Streamlit dashboard with 5 tabs: Climate story · Model arena · Forecast explorer · Ensemble lab · Tomorrow predictor (live forecast + what-if).
 * `artifacts/`: leaderboard, predictions, feature importances and trained models used by the dashboard.
 * `data/sri_lanka_weather_2016_2026.csv`: the dataset. If it is missing, the notebook downloads it again from Open-Meteo.
 

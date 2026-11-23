@@ -8,8 +8,8 @@ pandas==3.0.5
 numpy==2.5.3
 plotly==7.1.0
 joblib==1.6.0
+requests          # live mode: fetches today's weather from Open-Meteo
 # notebook-only
 statsmodels==0.15.0
 matplotlib==3.11.2
 seaborn==0.13.2
-requests

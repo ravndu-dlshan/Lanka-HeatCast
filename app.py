@@ -54,6 +54,89 @@ def load_models():
     return joblib.load(ART / "models.joblib")
 
 
+# ---------------- Live mode: fetch today's weather from Open-Meteo ----------------
+OM_VARS = ["temperature_2m_mean", "temperature_2m_max", "temperature_2m_min", "precipitation_sum",
+           "relative_humidity_2m_mean", "wind_speed_10m_max", "shortwave_radiation_sum",
+           "surface_pressure_mean", "cloud_cover_mean"]
+SHORT = {"temperature_2m_max": "tmax", "temperature_2m_mean": "tmean", "temperature_2m_min": "tmin",
+         "precipitation_sum": "rain", "relative_humidity_2m_mean": "rh", "cloud_cover_mean": "cloud",
+         "shortwave_radiation_sum": "rad", "wind_speed_10m_max": "wind", "surface_pressure_mean": "pres"}
+MONSOON = {12: "NE monsoon", 1: "NE monsoon", 2: "NE monsoon", 3: "1st inter-monsoon", 4: "1st inter-monsoon",
+           5: "SW monsoon", 6: "SW monsoon", 7: "SW monsoon", 8: "SW monsoon", 9: "SW monsoon",
+           10: "2nd inter-monsoon", 11: "2nd inter-monsoon"}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_live(city: str):
+    """Pull the last ~60 days of daily weather for `city` from Open-Meteo and build one
+    feature row for *today*, using exactly the notebook's feature engineering.
+
+    Returns (X_row, base, info) where X_row is a 1-row DataFrame in meta["features"] order,
+    base is the Series of today's observations, and info carries the NWP reference forecast.
+    """
+    import requests
+    lat, lon, _ = CITY_INFO[city]
+    r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=30, params=dict(
+        latitude=lat, longitude=lon, daily=",".join(OM_VARS),
+        timezone="Asia/Colombo", past_days=61, forecast_days=2))
+    r.raise_for_status()
+    j = r.json()
+    g = pd.DataFrame(j["daily"]).rename(columns={"time": "date"})
+    g["date"] = pd.to_datetime(g["date"])
+    g = g.sort_values("date").reset_index(drop=True)
+    g[OM_VARS] = g[OM_VARS].astype(float)
+
+    # "today" = the last day Open-Meteo reports as current rather than forecast
+    today = pd.Timestamp(j.get("current_weather", {}).get("time", g.date.iloc[-2])).normalize()
+    if today not in set(g.date):
+        today = g.date.iloc[-2]
+    nwp_row = g[g.date == today + pd.Timedelta(days=1)]
+    nwp_tomorrow = float(nwp_row.temperature_2m_max.iloc[0]) if not nwp_row.empty else None
+
+    hist = g[g.date <= today].copy()          # features must not see the future
+    if len(hist) < 31:
+        raise RuntimeError("Open-Meteo returned too little history to build 30-day features.")
+
+    # --- identical to make_features() in the notebook ---
+    for v, sh in SHORT.items():
+        hist[f"{sh}_lag0"] = hist[v]
+        for L in (1, 2, 6):
+            hist[f"{sh}_lag{L}"] = hist[v].shift(L)
+    for w in (3, 7, 30):
+        hist[f"tmax_roll{w}"] = hist["temperature_2m_max"].rolling(w).mean()
+    hist["tmax_std7"] = hist["temperature_2m_max"].rolling(7).std()
+    hist["rain_sum7"] = hist["precipitation_sum"].rolling(7).sum()
+    hist["rh_roll7"] = hist["relative_humidity_2m_mean"].rolling(7).mean()
+    hist["cloud_roll3"] = hist["cloud_cover_mean"].rolling(3).mean()
+    hist["pres_change"] = hist["surface_pressure_mean"].diff()
+    hist["tmax_change"] = hist["temperature_2m_max"].diff()
+    hist["dtr"] = hist["temperature_2m_max"] - hist["temperature_2m_min"]
+    doy = hist.date.dt.dayofyear
+    hist["doy_sin"] = np.sin(2 * np.pi * doy / 365.25)
+    hist["doy_cos"] = np.cos(2 * np.pi * doy / 365.25)
+    hist["month"] = hist.date.dt.month
+    hist["elevation"] = float(j.get("elevation", 0.0))
+
+    cur = hist.iloc[[-1]].copy()
+    for s in ("1st inter-monsoon", "2nd inter-monsoon", "NE monsoon", "SW monsoon"):
+        cur[f"ssn_{s}"] = int(MONSOON[int(cur.month.iloc[0])] == s)
+    for c in CITY_INFO:
+        cur[f"city_{c}"] = int(c == city)
+
+    missing = [f for f in meta["features"] if f not in cur.columns]
+    if missing:
+        raise RuntimeError(f"Live feature build is missing: {missing}")
+    X = cur[meta["features"]].astype(float)
+    if X.isna().any().any():
+        bad = X.columns[X.isna().any()].tolist()
+        raise RuntimeError(f"Live features contain NaN: {bad}")
+
+    base = cur.iloc[0]
+    info = dict(date=today, nwp_tomorrow=nwp_tomorrow,
+                fetched=pd.Timestamp.now(tz="Asia/Colombo"), elevation=float(j.get("elevation", 0.0)))
+    return X.reset_index(drop=True), base, info
+
+
 lb, per_city, season, preds, fimp, bcurve, tfeat, wdaily, meta = load()
 MODELS = [m for m in lb.index]
 best = lb.index[0]
@@ -254,19 +337,40 @@ with tab5:
         st.stop()
     tc = tfeat[tfeat.city == city].sort_values("date")
     c1, c2 = st.columns([1, 2])
+    live_info = None
     with c1:
-        day = st.date_input("Start from a real day (today's observations)", value=tc.date.max().date(),
-                            min_value=tc.date.min().date(), max_value=tc.date.max().date())
-        row = tc[tc.date.dt.date == day]
-        if row.empty:
-            row = tc.iloc[[-1]]
-        base = row.iloc[0]
-        st.caption(f"Observed on {base.date.date()} in {city}")
-        tmax = st.slider("Today's max temperature (°C)", 10.0, 40.0, float(round(base.tmax_lag0, 1)), 0.1)
-        rain = st.slider("Today's rainfall (mm)", 0.0, 150.0, float(round(base.rain_lag0, 1)), 0.5)
-        cloud = st.slider("Today's mean cloud cover (%)", 0.0, 100.0, float(round(base.cloud_lag0)), 1.0)
-        rad = st.slider("Today's solar radiation (MJ/m²)", 0.0, 30.0, float(round(base.rad_lag0, 1)), 0.1)
-        rh = st.slider("Today's mean humidity (%)", 40.0, 100.0, float(round(base.rh_lag0)), 1.0)
+        mode = st.radio("Starting conditions", ["🔴 Live — today", "🗓️ Historical replay"],
+                        horizontal=True, key="wi_mode",
+                        help="Live pulls today's actual weather from Open-Meteo. "
+                             "Historical replays any day in the 2024–2026 test period.")
+        if mode.startswith("🔴"):
+            try:
+                with st.spinner(f"Fetching today's weather for {city}…"):
+                    row, base, live_info = fetch_live(city)
+            except Exception as e:
+                st.warning(f"Live fetch failed ({e}). Falling back to the latest historical day.")
+                row, base, live_info = tc.iloc[[-1]], tc.iloc[-1], None
+            if live_info:
+                st.caption(f"🔴 **Live** · observed {live_info['date']:%a %d %b %Y} in {city} · "
+                           f"fetched {live_info['fetched']:%H:%M} Asia/Colombo · "
+                           f"forecasting **{live_info['date'] + pd.Timedelta(days=1):%a %d %b}**")
+        else:
+            day = st.date_input("Start from a real day (today's observations)", value=tc.date.max().date(),
+                                min_value=tc.date.min().date(), max_value=tc.date.max().date())
+            row = tc[tc.date.dt.date == day]
+            if row.empty:
+                row = tc.iloc[[-1]]
+            base = row.iloc[0]
+            st.caption(f"Observed on {base.date.date()} in {city}")
+        # slider defaults are rounded, so "has the user touched anything?" must compare
+        # against these defaults, not against the raw (unrounded) observations
+        d_tmax, d_rain = float(round(base.tmax_lag0, 1)), float(round(base.rain_lag0, 1))
+        d_cloud, d_rad, d_rh = float(round(base.cloud_lag0)), float(round(base.rad_lag0, 1)), float(round(base.rh_lag0))
+        tmax = st.slider("Today's max temperature (°C)", 10.0, 40.0, d_tmax, 0.1)
+        rain = st.slider("Today's rainfall (mm)", 0.0, 150.0, d_rain, 0.5)
+        cloud = st.slider("Today's mean cloud cover (%)", 0.0, 100.0, d_cloud, 1.0)
+        rad = st.slider("Today's solar radiation (MJ/m²)", 0.0, 30.0, d_rad, 0.1)
+        rh = st.slider("Today's mean humidity (%)", 40.0, 100.0, d_rh, 1.0)
     X = row[meta["features"]].copy().astype(float)
     dT, dR, dC = tmax - base.tmax_lag0, rain - base.rain_lag0, cloud - base.cloud_lag0
     X["tmax_lag0"] = tmax
@@ -284,7 +388,7 @@ with tab5:
     out["Stacking (meta-learner)"] = float(M["meta"].predict(pd.DataFrame([out])[list(meta["stack_weights"])])[0])
     out["Hybrid Linear + RF"] = float(M["Linear Regression"].predict(X)[0] + M["Linear+RF residual"].predict(X)[0] + lag[0])
     out["Persistence (baseline)"] = float(tmax)
-    actual = preds[(preds.city == city) & (preds.date == base.date)]
+    actual = preds[(preds.city == city) & (preds.date == base.date)] if live_info is None else preds.iloc[0:0]
     with c2:
         o = pd.Series(out).sort_values().reset_index()
         o.columns = ["model", "forecast"]
@@ -292,13 +396,28 @@ with tab5:
         o["family"] = o.model.map(fam_map).fillna("Hybrid")
         fig = px.bar(o, x="forecast", y="model", color="family", orientation="h", color_discrete_map=FAM_COLORS,
                      text=o.forecast.map(lambda v: f"{v:.1f} °C"), labels={"forecast": "Forecast max temp tomorrow (°C)", "model": ""})
-        if not actual.empty and abs(dT) + abs(dR) + abs(dC) < 1e-6 and abs(rad - base.rad_lag0) < 0.05 and abs(rh - base.rh_lag0) < 0.5:
+        untouched = (tmax == d_tmax and rain == d_rain and cloud == d_cloud
+                     and rad == d_rad and rh == d_rh)
+        if not actual.empty and untouched:
             fig.add_vline(x=float(actual.target.iloc[0]), line_dash="dash", line_color="black", annotation_text="actual")
-        fig.update_layout(height=430, xaxis_range=[min(o.forecast.min(), tmax) - 2, max(o.forecast.max(), tmax) + 1.5], margin=dict(t=10))
+        elif live_info is not None and live_info.get("nwp_tomorrow") is not None and untouched:
+            fig.add_vline(x=float(live_info["nwp_tomorrow"]), line_dash="dash", line_color="black",
+                          annotation_text="Open-Meteo forecast")
+        ref = [float(actual.target.iloc[0])] if (not actual.empty and untouched) else []
+        if live_info is not None and live_info.get("nwp_tomorrow") is not None and untouched:
+            ref.append(float(live_info["nwp_tomorrow"]))
+        lo = min([o.forecast.min(), tmax] + ref) - 2
+        hi = max([o.forecast.max(), tmax] + ref) + 1.5
+        fig.update_layout(height=430, xaxis_range=[lo, hi], margin=dict(t=10))
         st.plotly_chart(fig, use_container_width=True)
         hyb = out["Hybrid Linear + RF"]
         heat = "🔥 Hot afternoon — stay hydrated" if hyb >= 32 else ("🌤️ Warm" if hyb >= 26 else ("🌥️ Mild" if hyb >= 20 else "🧥 Cool highland day"))
         st.success(f"**{city}, tomorrow ({(base.date + pd.Timedelta(days=1)).date()}):** best-model forecast **{hyb:.1f} °C** · {heat}")
+        if live_info is not None and live_info.get("nwp_tomorrow") is not None:
+            nwp = float(live_info["nwp_tomorrow"])
+            st.caption(f"Open-Meteo's own numerical-weather forecast for the same day is **{nwp:.1f} °C** "
+                       f"({hyb - nwp:+.1f} °C vs this ensemble). Our models see only *yesterday-and-earlier* "
+                       f"station-style variables, so agreeing this closely with a full physics model is the benchmark worth beating.")
         st.caption("Try it: raise today's rainfall and cloud cover. The tree ensembles react with non-linear jumps, "
                    "while the linear model moves smoothly. That difference is why the hybrid works.")
 

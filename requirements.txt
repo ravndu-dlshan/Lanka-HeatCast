@@ -1,0 +1,15 @@
+# Pinned to the versions used to train artifacts/models.joblib (Python 3.13).
+# If these can't be installed on your Python, install unpinned versions and re-run the notebook to regenerate artifacts/.
+streamlit==1.67.0
+scikit-learn==1.9.1
+lightgbm==4.7.0
+catboost==1.2.10
+pandas==3.0.5
+numpy==2.5.3
+plotly==7.1.0
+joblib==1.6.0
+# notebook-only
+statsmodels==0.15.0
+matplotlib==3.11.2
+seaborn==0.13.2
+requests

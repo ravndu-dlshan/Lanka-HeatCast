@@ -32,8 +32,6 @@ streamlit run app.py
 2. Go to https://share.streamlit.io, choose **New app**, select the repo, branch `main` and file `app.py`, and set Python to **3.13** under *Advanced settings*.
 3. Deploy, then submit the `https://<name>.streamlit.app` URL.
 
-## GenAI disclosure
-The code in the notebook and the dashboard UI were **generated with the assistance of Claude (Anthropic)**, a
-generative-AI tool, and then reviewed, executed and checked by the author.
+
 
 *Weather data by [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0), based on ERA5 reanalysis (Copernicus Climate Change Service).*

@@ -13,3 +13,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-private notes
+VIDEO_SCRIPT.md
